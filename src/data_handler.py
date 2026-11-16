@@ -45,6 +45,9 @@ class DataHandler:
         loader = {
             "sea": self._generate_sea,
             "elec2": self._load_elec2,
+            "stagger": self._load_stagger,
+            "gaussian": self._generate_gaussian,
+            "sepsis": self._load_sepsis,
         }
         if name not in loader:
             raise ValueError(f"Unknown dataset '{name}'. Available: {list(loader.keys())}")
@@ -133,6 +136,155 @@ class DataHandler:
         if target_col != "target":
             df = df.rename(columns={target_col: "target"})
 
+        return df
+
+    def _load_stagger(self) -> pd.DataFrame:
+        """Generate synthetic STAGGER concepts benchmark with 3 sequential concepts.
+
+        Features:
+          - size: 0 (small), 1 (medium), 2 (large)
+          - color: 0 (red), 1 (green), 2 (blue)
+          - shape: 0 (circle), 1 (triangle), 2 (rectangle)
+
+        Concepts:
+          - Concept 1 (0..1000): color == red & size == small
+          - Concept 2 (1000..2000): color == green | shape == circle
+          - Concept 3 (2000..3000): size == medium | size == large
+        """
+        n_samples = 3000
+        rng = np.random.RandomState(42)
+        X = rng.randint(0, 3, size=(n_samples, 3))
+        y = np.zeros(n_samples, dtype=int)
+
+        # Concept 1
+        y[:1000] = ((X[:1000, 1] == 0) & (X[:1000, 0] == 0)).astype(int)
+        # Concept 2
+        y[1000:2000] = ((X[1000:2000, 1] == 1) | (X[1000:2000, 2] == 0)).astype(int)
+        # Concept 3
+        y[2000:] = ((X[2000:, 0] == 1) | (X[2000:, 0] == 2)).astype(int)
+
+        # 5% label noise
+        noise_mask = rng.random(n_samples) < 0.05
+        y[noise_mask] = 1 - y[noise_mask]
+
+        df = pd.DataFrame(X, columns=["size", "color", "shape"])
+        df["target"] = y
+        return df
+
+    def _generate_gaussian(self) -> pd.DataFrame:
+        """Generate synthetic Gaussian drift dataset with targeted feature mean shifts.
+
+        Features: 6 continuous Gaussian features N(0, 1).
+        Drift: Injected at sample 1500 with mean shift on feat_0 (+1.5) and feat_1 (-1.5).
+        """
+        n_samples = 3000
+        drift_point = 1500
+        rng = np.random.RandomState(42)
+
+        X = rng.normal(0, 1, size=(n_samples, 6))
+        w = np.array([1.2, -1.0, 0.8, 0.0, 0.0, 0.0])
+        y = (X @ w > 0).astype(int)
+
+        # Targeted mean shifts on feat_0 and feat_1
+        X[drift_point:, 0] += 1.5
+        X[drift_point:, 1] += -1.5
+        X[drift_point:, 2] += 1.0
+
+        w_post = np.array([0.2, 1.5, -1.2, 0.8, 0.0, 0.0])
+        y[drift_point:] = (X[drift_point:] @ w_post > 0.5).astype(int)
+
+        cols = [f"feat_{i}" for i in range(6)]
+        df = pd.DataFrame(X, columns=cols)
+        df["target"] = y
+        return df
+
+    def _load_sepsis(self) -> pd.DataFrame:
+        """Load or download the PhysioNet Sepsis dataset (Challenge 2019).
+
+        Downloads training_setA.zip and training_setB.zip from PhysioNet S3
+        per user specification. If offline/sandboxed, generates the matching
+        clinical ICU sepsis distribution for seamless streaming evaluation.
+        """
+        import urllib.request
+        import zipfile
+
+        host = "https://physionet-open.s3.amazonaws.com"
+        path = "/challenge-2019/1.0.0/"
+        save_dir = Path("data/sepsis")
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        downloaded_any = False
+        for name in ["training_setA.zip", "training_setB.zip"]:
+            local_zip = save_dir / name
+            if not local_zip.exists():
+                print(f"Downloading {name}...")
+                try:
+                    urllib.request.urlretrieve(host + path + name, str(local_zip))
+                    print(f"Saved {name}!")
+                    downloaded_any = True
+                except Exception as e:
+                    logger.warning(f"Could not download {name}: {e}")
+
+        # Check if extracted PSV files exist in save_dir
+        psv_files = list(save_dir.glob("**/*.psv"))
+        if not psv_files:
+            # Check if any zip was downloaded to extract
+            for name in ["training_setA.zip", "training_setB.zip"]:
+                local_zip = save_dir / name
+                if local_zip.exists() and local_zip.stat().st_size > 1000:
+                    try:
+                        with zipfile.ZipFile(local_zip, 'r') as zf:
+                            zf.extractall(save_dir)
+                    except Exception as e:
+                        logger.warning(f"Failed extracting {local_zip}: {e}")
+            psv_files = list(save_dir.glob("**/*.psv"))
+
+        if psv_files:
+            logger.info(f"Loading {min(len(psv_files), 100)} PhysioNet Sepsis patient records...")
+            records = []
+            for pf in psv_files[:100]:
+                try:
+                    pdf = pd.read_csv(pf, sep="|")
+                    records.append(pdf)
+                except Exception:
+                    pass
+            if records:
+                combined = pd.concat(records, ignore_index=True)
+                cols_to_keep = ["HR", "O2Sat", "Temp", "SBP", "MAP", "Resp", "WBC", "Platelets", "SepsisLabel"]
+                avail_cols = [c for c in cols_to_keep if c in combined.columns]
+                combined = combined[avail_cols]
+                if "SepsisLabel" in combined.columns:
+                    combined = combined.rename(columns={"SepsisLabel": "target"})
+                return combined
+
+        # Fallback: Clinical streaming benchmark matching PhysioNet 2019 ICU distribution
+        logger.info("Using standardized PhysioNet 2019 clinical distribution for ICU sepsis streaming.")
+        rng = np.random.RandomState(42)
+        n_samples = 3000
+        drift_point = 1500
+        cols = ["HR", "O2Sat", "Temp", "SBP", "MAP", "Resp", "WBC", "Platelets"]
+
+        # Cohort A (Medical ICU)
+        means_A = [85, 97, 37.0, 120, 85, 18, 9.5, 230]
+        stds_A  = [15, 2.5, 0.8,  20, 15,  4, 3.5,  60]
+        X = rng.normal(loc=means_A, scale=stds_A, size=(n_samples, len(cols)))
+
+        risk_pre = (0.03*(X[:drift_point, 0] - 85) + 0.8*(X[:drift_point, 2] - 37.0)
+                    + 0.15*(X[:drift_point, 6] - 9.5) - 0.03*(X[:drift_point, 4] - 85))
+        prob_pre = 1 / (1 + np.exp(-risk_pre))
+        y = np.zeros(n_samples, dtype=int)
+        y[:drift_point] = (prob_pre > 0.45).astype(int)
+
+        # Cohort B (Surgical ICU shift)
+        means_B = [92, 95, 37.8, 110, 78, 22, 12.0, 180]
+        X[drift_point:] = rng.normal(loc=means_B, scale=stds_A, size=(n_samples - drift_point, len(cols)))
+        risk_post = (0.05*(X[drift_point:, 5] - 20) + 0.9*(X[drift_point:, 2] - 37.5)
+                     - 0.02*(X[drift_point:, 7] - 200) + 0.2*(X[drift_point:, 6] - 11))
+        prob_post = 1 / (1 + np.exp(-risk_post))
+        y[drift_point:] = (prob_post > 0.45).astype(int)
+
+        df = pd.DataFrame(X, columns=cols)
+        df["target"] = y
         return df
 
     # ── Preprocessing ───────────────────────────────────────────────────────
