@@ -22,6 +22,7 @@ env/
 # DriftInsights artifacts
 data/*.csv
 data/*.parquet
+data/sepsis/
 models/*.joblib
 models/*.pkl
 logs/*.jsonl
