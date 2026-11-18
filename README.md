@@ -114,6 +114,17 @@ All parameters are in `config/default.yaml`:
 | SHAP Runtime | < 30s | < 1s |
 | Incremental Retrain | < 10s | < 0.1s |
 
+## Research Benchmarks & Reproduction
+
+Comprehensive multi-seed benchmark tables (SEA, STAGGER, Gaussian, ELEC2, and PhysioNet CinC 2019 Sepsis), along with the hardware comparison between single-core container runs and 6-core local workstation runs, are documented in [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md).
+
+To view all benchmark summaries from the included raw outputs:
+```bash
+python di_summary.py results_synthetic.json
+python di_summary.py elec2.json
+python di_summary.py sepsis_real.json
+```
+
 ## License
 
 MIT
